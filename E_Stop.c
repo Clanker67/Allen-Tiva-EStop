@@ -27,10 +27,10 @@
 //! SSI0Fss - PA3
 //! SSI0Rx  - PA4
 //! SSI0Tx  - PA5
-
 // System functions prototype include section:
 #include <stdint.h>
 #include <stdbool.h>
+#include <stdio.h>
 #include "inc/hw_memmap.h"
 #include "inc/hw_types.h"
 #include "driverlib/sysctl.h"
@@ -40,6 +40,7 @@
 #include "inc/hw_gpio.h"
 #include "driverlib/rom.h"
 #include "driverlib/timer.h"
+#include <string.h>
 // UART & SSI Prototype functions
 #include "driverlib/uart.h"
 #include "driverlib/ssi.h"
@@ -62,21 +63,14 @@ uint32_t SSI_ARD_Received_Char;
 
 //---------------ADDED BY ALLEN------------------------//
 
-//Globals variables for the timer
-#define NUMT 3
-volatile uint8_t TFlag[NUMT];
-volatile uint32_t TPrev[NUMT];
-volatile uint32_t TPeriod[NUMT];
-volatile uint32_t g_ms = 0;
-
 //Aliases Made by Allen
 #define ESTOP_OUTPUT_PORT   GPIO_PORTF_BASE
 #define ESTOP_LED_PIN      GPIO_PIN_1
 #define ESTOP_RELAY_PIN    GPIO_PIN_2
 #define HEARTBEAT          GPIO_PIN_3
-//#define ESTOP_INPUT_PORT    GPIO_PORTC_BASE
-//#define ESTOP_INPUT_PIN1    GPIO_PIN_4
-//#define ESTOP_INPUT_PIN2    GPIO_PIN_5
+//#define ESTOP_INPUT_PORT    GPIO_PORTA_BASE
+//#define ESTOP_INPUT_PIN1    GPIO_PIN_2
+//#define ESTOP_INPUT_PIN2    GPIO_PIN_3
 #define MECHANICAL_ESTOP_SIMULATED   GPIO_PIN_4
 #define WIRELESS_ESTOP_SIMULATED     GPIO_PIN_0
 
@@ -84,9 +78,6 @@ volatile uint32_t g_ms = 0;
 #define ESTOP_INPUT_PORT    GPIO_PORTA_BASE
 #define ESTOP_INPUT_PIN1    GPIO_PIN_2
 #define ESTOP_INPUT_PIN2    GPIO_PIN_3
-
-//variable for for loops
-//uint32_t i = 0;
 
 //Communication Variables from Arduino Code AZ 1/27/2026
 char checksum = 0;
@@ -100,27 +91,31 @@ unsigned int controlVehicle = 0; //variable to indicate if the system is control
 //Variables used to keep track of the reception state across interrupts.
 //Parser State
 volatile uint8_t rx_idx = 0;
-volatile uint8_t rx_len = 0;
+volatile uint8_t rx_len_byte0 = 0;   // stores length LSB temporarily
+volatile uint16_t rx_len = 0;
 volatile uint8_t rx_state = 0;     // 0=WAIT_START, 1=WAIT_LEN, 2=COLLECT
 volatile uint8_t ROSDataIN_Valid = 0;
+
+//Flag for sending the data
+volatile uint8_t Data_Flag_Send = FALSE;
 
 //state aliases
 #define RX_WAIT_START  0
 #define RX_WAIT_LEN    1
 #define RX_COLLECT     2
 
-#define START_BYTE     'f'          // Change this later to match whatever my start bit is
+#define START_BYTE     'e'          // Change this later to match whatever my start bit is
 #define IN_PKT_SIZE    (sizeof(sensorData_IN_t))
 
 //Data Structures for communication coming from arduino and microcontroller
 typedef struct __attribute__((packed))
 {
     char DataStart;
-    uint8_t DataLength;
+    uint16_t DataLength;
     char estop;
     char light;
     uint16_t seq;
-    uint8_t checksum;
+    char checksum;
 } sensorData_IN_t;
 
 typedef union
@@ -135,10 +130,10 @@ ROS_Packet_IN_t ROSDataIN;
 typedef struct __attribute__((packed))
 {
     char DataStart; // data type changed A.Z
-    unsigned int DataLength;
-    uint8_t info; // data type changed A.Z
-    unsigned int seq;
-    uint8_t checksum; // data type changed A.Z
+    int16_t DataLength;
+    char info; // data type changed A.Z
+    uint16_t seq;
+    char checksum; // data type changed A.Z
 } sensorData_OUT_t;
 
 typedef union
@@ -149,61 +144,16 @@ typedef union
 
 ROS_Packet_OUT_t ROSDataOUT;
 
-/*
-//Function to increment the timer variable g_ms
-void SysTick_Handler(void)
-{
-    g_ms++;
-}
-
-//Functions to update the timers
-//This function takes the ms that was being counted by the systick_handler and returns it anywhere that the function millis is called.
-static inline uint32_t millis(void)
-{
-    return g_ms;
-}
-
-static inline void UART0_SendByte(uint8_t);
-
-void TimersInit(void)
-{
-    uint32_t now = millis();
-    //local variable only used for this forLoop:
-     uint32_t i = 0;
-    for (i = 0; i < NUMT; i++)
-    {
-        TPrev[i] = now;
-        TFlag[i] = false;
-    }
-
-}
-
-
-void TimersUpdate(void)
-{
-    uint32_t now = millis();
-    //local variable only used for this forLoop:
-     uint32_t i = 0;
-    for (i = 0; i < NUMT; i++)
-    {
-        if ((now - TPrev[i]) >= TPeriod[i])
-        {
-            TPrev[i] = now;
-            TFlag[i] = true;
-        }
-    }
-}
-*/
-
 void Timer0A_Handler(void)
 {
     TimerIntClear(TIMER0_BASE, TIMER_TIMA_TIMEOUT);
-    //RosUpdateSend();
+
     uint8_t v = GPIOPinRead(GPIO_PORTF_BASE, GPIO_PIN_1);
     GPIOPinWrite(GPIO_PORTF_BASE, GPIO_PIN_1, v ^ GPIO_PIN_1);
 
-}
+    Data_Flag_Send = TRUE;
 
+}
 //Timer
 void Timer0A_Init(uint32_t period_us)
 {
@@ -248,18 +198,32 @@ static inline void UART0_SendByte(uint8_t b)
 
 void RosUpdateSend(void)
 {
-    uint8_t PC4_pin;
-    uint8_t PC5_pin;
+
+    uint8_t PA2_pin;
+    uint8_t PA3_pin;
     //fill the packet being sent for ros data, this is not actually being sent over ros2, but it is information to be used by ros
     ROSDataOUT.sensor.DataStart = 'f';
     ROSDataOUT.sensor.DataLength = sizeof(ROSDataOUT.ROSPacket);
 
-    //read the digital input pins
-    PC4_pin = (GPIOPinRead(ESTOP_INPUT_PORT, ESTOP_INPUT_PIN1) ? 1 : 0);
-    PC5_pin = (GPIOPinRead(ESTOP_INPUT_PORT, ESTOP_INPUT_PIN2) ? 1 : 0);
-    ROSDataOUT.sensor.info = (PC4_pin && PC5_pin);
+    //read the digital input pins but sets the variable equal to the !NOT of the input (logic high input == 0, etc)
+    PA2_pin = (GPIOPinRead(ESTOP_INPUT_PORT, ESTOP_INPUT_PIN1) ? 0 : 1);
+    PA3_pin = (GPIOPinRead(ESTOP_INPUT_PORT, ESTOP_INPUT_PIN2) ? 0 : 1);
+    ROSDataOUT.sensor.info = (PA2_pin && PA3_pin);
 
-    ROSDataOUT.sensor.seq++;
+    if (ROSDataOUT.sensor.seq == 65535){
+        ROSDataOUT.sensor.seq = 0;
+    }
+    else ROSDataOUT.sensor.seq++;
+
+
+
+    //For Debugging
+    char msg[64];
+    snprintf(msg, sizeof(msg),
+             "PA2=%d PA3=%d INFO=%d SEQ=%u\r\n",
+             PA2_pin, PA3_pin, ROSDataOUT.sensor.info, ROSDataOUT.sensor.seq);
+
+    UARTSend((uint8_t*)msg, strlen(msg));
 
     //checksum of the bites to make sure the packet is properly filled
     uint32_t sum = 0;
@@ -275,11 +239,14 @@ void RosUpdateSend(void)
     uint8_t chk = (uint8_t) (0xFF - (sum & 0xFF));
     ROSDataOUT.sensor.checksum = chk;
 
+
     //send all the bytes
+    /*
     for (i = 0; i < sizeof(ROSDataOUT.ROSPacket); i++)
     {
         UART0_SendByte(ROSDataOUT.ROSPacket[i]);
     }
+    */
 
 }
 
@@ -301,24 +268,14 @@ int main(void)
     // Enable the peripheralS:
     SysCtlPeripheralEnable(SYSCTL_PERIPH_UART0);
 
-    /*
-    //Setting Up my SysTick
-    SysTickPeriodSet(SysCtlClockGet() / 1000); //1ms
-    SysTickIntEnable();
-    SysTickEnable();
-    */
-
-    //Setting Periods
-    TPeriod[0] = 20; //50hz
-    TPeriod[1] = 100; // 10hz
-    TPeriod[2] = 1000; // 1hz
-
-    //initialize the timer to work at 10hz
-    Timer0A_Init(100000);
+    //initialize the timer to work at 1hz set in uS
+    Timer0A_Init(1000000);
 
     //setting up the output pins following the arduino code
     GPIOPinTypeGPIOOutput(ESTOP_OUTPUT_PORT,
     ESTOP_LED_PIN | ESTOP_RELAY_PIN | HEARTBEAT);
+
+
 
     //GPIOPinTypeGPIOInput(GPIO_PORTF_BASE, MECHANICAL_ESTOP_SIMULATED | WIRELESS_ESTOP_SIMULATED);
 
@@ -336,6 +293,12 @@ int main(void)
 
     //Setting up the 2 input pins needed (Corresponding to pin 10 and 11 on the arduino)
     GPIOPinTypeGPIOInput(ESTOP_INPUT_PORT, ESTOP_INPUT_PIN1 | ESTOP_INPUT_PIN2);
+
+    //Setup pullup resistors for the input ports
+    GPIOPadConfigSet(ESTOP_INPUT_PORT,
+                     ESTOP_INPUT_PIN1 | ESTOP_INPUT_PIN2,
+                     GPIO_STRENGTH_2MA,
+                     GPIO_PIN_TYPE_STD_WPD);
 
     ROSDataOUT.sensor.seq = 0;
 
@@ -361,15 +324,10 @@ int main(void)
     // Loop forever echoing data through the UART.
     while (1)
     {
-        /*
-        //setting up the timers to only send data out at 10 hz (every 100ms)
-        TimersUpdate();
-
-        if (TFlag[1]){
-            TFlag[1] = 0; //sets the flag back to false
+        if (Data_Flag_Send){
             RosUpdateSend();
+            Data_Flag_Send = FALSE;
         }
-        */
 
         if (ROSDataIN_Valid)
         {
@@ -438,20 +396,28 @@ void ISR_UARTIntHandler(void)
             break;
 
         case RX_WAIT_LEN:
-            rx_len = b;
+            // We need 2 bytes for DataLength: LSB then MSB (little-endian)
+            if (rx_idx == 1) {
+                // first length byte (LSB)
+                rx_len_byte0 = b;
+                ROSDataIN.ROSPacket[rx_idx++] = b;   // store length LSB at index 1
+            } else {
+                // second length byte (MSB)
+                ROSDataIN.ROSPacket[rx_idx++] = b;   // store length MSB at index 2
 
-            // Sanity check (simple version: fixed length)
-            if (rx_len != (uint8_t) IN_PKT_SIZE)
-            {
-                // bad length -> reset and resync
-                rx_state = RX_WAIT_START;
-                rx_idx = 0;
-                break;
+                rx_len = (uint16_t)((uint16_t)b << 8) | rx_len_byte0;  // assemble 16-bit length
+
+                // Sanity check: fixed-size packet
+                if (rx_len != (uint16_t)IN_PKT_SIZE) {
+                    rx_state = RX_WAIT_START;
+                    rx_idx = 0;
+                    break;
+                }
+
+                rx_state = RX_COLLECT;
             }
-
-            ROSDataIN.ROSPacket[rx_idx++] = b;  // store length byte
-            rx_state = RX_COLLECT;
             break;
+
 
         case RX_COLLECT:
             // prevent overflow
@@ -474,7 +440,7 @@ void ISR_UARTIntHandler(void)
                     uint32_t i = 0;
 
                     // Sum all bytes except the last one (checksum byte)
-                    for (i = 0; i < (rx_len - 1); i++)
+                    for (i = 3; i < (rx_len - 1); i++)
                     {
                         sum += ROSDataIN.ROSPacket[i];
                     }
@@ -520,7 +486,7 @@ void UARTSend(const uint8_t *pui8Buffer, uint32_t ui32Count)
         //
         // Write the next character to the UART.
         //
-        UARTCharPutNonBlocking(UART0_BASE, *pui8Buffer++);
+        UARTCharPut(UART0_BASE, *pui8Buffer++); //switched it to blocking
     }
 }
 
