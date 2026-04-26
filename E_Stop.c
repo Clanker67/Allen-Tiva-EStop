@@ -109,7 +109,7 @@ typedef struct __attribute__((packed))
 {
     char DataStart; // data type changed A.Z
     int16_t DataLength;
-    char info; // data type changed A.Z
+    int8_t info; // data type changed A.Z
     uint16_t seq;
     char checksum; // data type changed A.Z
 } sensorData_OUT_t;
@@ -127,32 +127,31 @@ void Timer0A_Handler(void)
     TimerIntClear(TIMER0_BASE, TIMER_TIMA_TIMEOUT);
     static int count = 0;
     const int div = 5;
-
     count++;
 //Added by Andrew Rios March 2
     switch (StatesLights)
     {
-    case 1: // ON
+    case 2:// E-Stop is pressed, light turns off;
+        GPIOPinWrite(GPIO_PORTF_BASE, GPIO_PIN_1, 0);
+                break;
+    case 3: // ON
         GPIOPinWrite(GPIO_PORTF_BASE, GPIO_PIN_1, GPIO_PIN_1);
         break;
-    case 2: //blinking
+    case 4: //blinking
     {
         uint8_t v = GPIOPinRead(GPIO_PORTF_BASE, GPIO_PIN_1);
-        //GPIOPinWrite(GPIO_PORTF_BASE, GPIO_PIN_1, v ^ GPIO_PIN_1);
-        break;
+        if (count >= div)
+        {
+            GPIOPinWrite(GPIO_PORTF_BASE, GPIO_PIN_1, v ^ GPIO_PIN_1);
+            count = 0;
+        }
     }
     default: // OFF or undefined state
         GPIOPinWrite(GPIO_PORTF_BASE, GPIO_PIN_1, 0);
         break;
-
     }
 
-    uint8_t v = GPIOPinRead(GPIO_PORTF_BASE, GPIO_PIN_1);
-    if (count >= div) {
-        GPIOPinWrite(GPIO_PORTF_BASE, GPIO_PIN_1, v ^ GPIO_PIN_1);
-        count = 0;
-    }
-
+    //Sets Flag to send the data within the while(1) loop
     Data_Flag_Send = TRUE;
 
 }
@@ -173,6 +172,7 @@ void Timer0A_Init(uint32_t period_us)
 
     uint32_t clock_hz = SysCtlClockGet(); //automatically gets sysclock to calculate required ticks
     uint32_t ticks = (uint32_t) (((uint64_t) clock_hz * period_us) / 1000000ULL);
+
 //5) Load timer
     TimerLoadSet(TIMER0_BASE, TIMER_A, ticks - 1);
 
@@ -180,10 +180,6 @@ void Timer0A_Init(uint32_t period_us)
 // 6) Clear any pending timeout interrupt and then arm it
     TimerIntClear(TIMER0_BASE, TIMER_TIMA_TIMEOUT);
     TimerIntEnable(TIMER0_BASE, TIMER_TIMA_TIMEOUT);
-
-// 7) NVIC: set priority and enable the interrupt
-// "2" here matches your intent; exact numeric meaning depends on priority bits.
-//IntPrioritySet(INT_TIMER0A, 2 << 5);
 
 // Enable interrupts in NVIC
     IntEnable(INT_TIMER0A);
@@ -220,11 +216,13 @@ void RosUpdateSend(void)
         ROSDataOUT.sensor.seq++;
 
 //For Debugging
-    char msg[64];
-    snprintf(msg, sizeof(msg), "PA2=%d PA3=%d INFO=%d SEQ=%u\r\n", PA2_pin,
-             PA3_pin, ROSDataOUT.sensor.info, ROSDataOUT.sensor.seq);
+    /*
+     char msg[64];
+     snprintf(msg, sizeof(msg), "PA2=%d PA3=%d INFO=%d SEQ=%u\r\n", PA2_pin,
+     PA3_pin, ROSDataOUT.sensor.info, ROSDataOUT.sensor.seq);
 
-    UARTSend((uint8_t*) msg, strlen(msg));
+     UARTSend((uint8_t*) msg, strlen(msg));
+     */
 
 //checksum of the bites to make sure the packet is properly filled
     uint32_t sum = 0;
@@ -241,12 +239,10 @@ void RosUpdateSend(void)
     ROSDataOUT.sensor.checksum = chk;
 
 //send all the bytes
-    /*
-     for (i = 0; i < sizeof(ROSDataOUT.ROSPacket); i++)
-     {
-     UART0_SendByte(ROSDataOUT.ROSPacket[i]);
-     }
-     */
+    for (i = 0; i < sizeof(ROSDataOUT.ROSPacket); i++)
+    {
+        UART0_SendByte(ROSDataOUT.ROSPacket[i]);
+    }
 
 }
 
@@ -268,26 +264,12 @@ int main(void)
 // Enable the peripheralS:
     SysCtlPeripheralEnable(SYSCTL_PERIPH_UART0);
 
-//initialize the timer to work at 1hz set in uS
+// Initialize Timer0A to interrupt at 10 Hz using period in microseconds (100000 us  = 0.1s = 10hz)
     Timer0A_Init(100000);
 
 //setting up the output pins following the arduino code
     GPIOPinTypeGPIOOutput(ESTOP_OUTPUT_PORT,
     ESTOP_LED_PIN | ESTOP_RELAY_PIN | HEARTBEAT);
-
-//GPIOPinTypeGPIOInput(GPIO_PORTF_BASE, MECHANICAL_ESTOP_SIMULATED | WIRELESS_ESTOP_SIMULATED);
-
-//writing the LED output for pin 1 which is the LED on top of the car
-//GPIOPinWrite(GPIO_PORTF_BASE, GPIO_PIN_1, GPIO_PIN_1);
-//GPIOPinWrite(GPIO_PORTF_BASE, GPIO_PIN_1, 0);
-
-//Writing the Estop Output for pin 2 which controls the relay
-//GPIOPinWrite(GPIO_PORTF_BASE, GPIO_PIN_2, GPIO_PIN_2);
-//GPIOPinWrite(GPIO_PORTF_BASE, GPIO_PIN_2, 0);
-
-//Writing the heartbeat output
-//GPIOPinWrite(GPIO_PORTF_BASE, GPIO_PIN_3, GPIO_PIN_3);
-//GPIOPinWrite(GPIO_PORTF_BASE, GPIO_PIN_3, 0);
 
 //Setting up the 2 input pins needed (Corresponding to pin 10 and 11 on the arduino)
     GPIOPinTypeGPIOInput(ESTOP_INPUT_PORT, ESTOP_INPUT_PIN1 | ESTOP_INPUT_PIN2);
@@ -332,6 +314,7 @@ int main(void)
         {
             ROSDataIN_Valid = 0; // reset the checksum validator
 //Logic translated from the arduino Allen Zaina
+
 //Relay Check
             if (ROSDataIN.sensor.estop != 0)
             {
@@ -342,17 +325,6 @@ int main(void)
                 GPIOPinWrite(ESTOP_OUTPUT_PORT, ESTOP_RELAY_PIN,
                 ESTOP_RELAY_PIN);
             }
-//LED Check?
-            /*
-            if (ROSDataIN.sensor.light != 0)
-            {
-                GPIOPinWrite(ESTOP_OUTPUT_PORT, ESTOP_LED_PIN, 0);
-            }
-            else
-            {
-                GPIOPinWrite(ESTOP_OUTPUT_PORT, ESTOP_LED_PIN, ESTOP_LED_PIN);
-            }
-            */
 
         }
     }
